@@ -167,5 +167,38 @@ class TestLongtrace(unittest.TestCase):
             else:
                 raise e
 
+    def test_07_manual_span(self):
+        """测试手动的 start_span 和 complete_span"""
+        tracer = longtrace.Tracer()
+        try:
+            # Start a span
+            span_id = tracer.start_span("Manual Span", json.dumps({"type": "manual"}))
+            self.assertIsInstance(span_id, str)
+            self.assertTrue(len(span_id) > 0)
+            
+            # Log inside manual span
+            tracer.log("Inside Manual Span")
+            
+            # Start nested manual span
+            nested_span_id = tracer.start_span("Nested Manual Span")
+            tracer.log("Inside Nested Manual Span")
+            
+            # Complete nested span
+            tracer.complete_span(nested_span_id)
+            
+            # Complete outer span
+            tracer.complete_span(span_id)
+            
+            # Test error: complete wrong span (if stack logic is strict)
+            # Or test complete non-existent span
+            with self.assertRaises(RuntimeError):
+                tracer.complete_span("invalid-uuid")
+                
+        except RuntimeError as e:
+            if "Database not initialized" in str(e) or "connection" in str(e).lower():
+                print(f"Skipping manual span test due to DB error: {e}")
+            else:
+                raise e
+
 if __name__ == "__main__":
     unittest.main()
