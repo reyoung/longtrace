@@ -122,6 +122,10 @@ impl Database {
         let exists: bool = row.get(0);
 
         if !exists {
+            // Validate database name contains only alphanumeric characters for safety
+            if !db_name.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err("Database name contains invalid characters".to_string());
+            }
             // Create the database
             // Note: We can't use parameterized queries for database names
             let create_db_sql = format!("CREATE DATABASE \"{}\"", db_name);
