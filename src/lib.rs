@@ -252,26 +252,14 @@ fn initialize(connection_string: &str, batch_size: Option<usize>, candidate_name
 }
 
 #[pyfunction]
-#[pyo3(signature = (message, span_id, parent_id, attr=None))]
-fn report(message: String, span_id: String, parent_id: String, attr: Option<String>) -> PyResult<()> {
-    let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
-    let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
-    
-    let span_uuid = Uuid::parse_str(&span_id)
-        .map_err(|e| PyRuntimeError::new_err(format!("Invalid span_id UUID: {}", e)))?;
-    let parent_uuid = Uuid::parse_str(&parent_id)
-        .map_err(|e| PyRuntimeError::new_err(format!("Invalid parent_id UUID: {}", e)))?;
-        
-    db.report(message, span_uuid, parent_uuid, attr, 0)
-        .map_err(PyRuntimeError::new_err)
-}
-
-#[pyfunction]
 fn flush() -> PyResult<()> {
     let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
-    let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
-    
-    db.flush().map_err(PyRuntimeError::new_err)
+    if let Some(db) = guard.as_ref() {
+        db.flush().map_err(PyRuntimeError::new_err)
+    } else {
+        // If not initialized, flush does nothing
+        Ok(())
+    }
 }
 
 // --- Tracer Implementation ---
@@ -421,10 +409,15 @@ impl SpanGuard {
 #[pymodule]
 fn longtrace(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(initialize, m)?)?;
-    m.add_function(wrap_pyfunction!(report, m)?)?;
     m.add_function(wrap_pyfunction!(flush, m)?)?;
     m.add_class::<Tracer>()?;
     m.add_class::<SpanGuard>()?;
+
+    // Register atexit hook for automatic flush
+    let py = m.py();
+    let atexit = py.import_bound("atexit")?;
+    atexit.call_method1("register", (m.getattr("flush")?,))?;
+
     Ok(())
 }
 

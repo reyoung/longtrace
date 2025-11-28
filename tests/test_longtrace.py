@@ -161,13 +161,6 @@ class TestLongtrace(unittest.TestCase):
             with tracer.span("Span with None attr", None):
                 pass
                 
-            # 测试 report 不传 attr
-            span_id = str(uuid.uuid4())
-            parent_id = str(uuid.uuid4())
-            longtrace.report("Report without attr", span_id, parent_id)
-            
-            longtrace.report("Report with None attr", span_id, parent_id, None)
-            
         except RuntimeError as e:
             if "Database not initialized" in str(e) or "connection" in str(e).lower():
                 print(f"Skipping optional attr test due to DB error: {e}")

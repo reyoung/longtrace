@@ -87,28 +87,9 @@ with tracer.span("Processing Request", attr=json.dumps({"request_id": "123"})):
 tracer.log("Simple log without attributes")
 ```
 
-### Manual Reporting
-
-You can also manually report records if you need full control over IDs.
-
-```python
-import longtrace
-import uuid
-
-span_id = str(uuid.uuid4())
-parent_id = str(uuid.uuid4())
-
-longtrace.report(
-    message="Manual report",
-    span_id=span_id,
-    parent_id=parent_id,
-    attr='{"custom": "data"}' # Optional JSON string
-)
-```
-
 ### Flushing
 
-The library automatically flushes records in the background. However, you can force a flush, which is useful before application exit.
+The library automatically flushes records in the background and when the application exits. However, you can force a flush manually if needed.
 
 ```python
 longtrace.flush()
