@@ -7,8 +7,9 @@ use chrono::Local;
 use std::str::FromStr;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, ThreadId};
 use uuid::Uuid;
+use dashmap::DashMap;
 
 // --- Record Structure ---
 
@@ -182,11 +183,11 @@ impl RustDatabase {
         }
     }
 
-    pub fn report(&self, message: String, span_id: Uuid, parent_id: Uuid, attr: String) -> Result<(), String> {
+    pub fn report(&self, message: String, span_id: Uuid, parent_id: Uuid, attr: String, record_type: i32) -> Result<(), String> {
         let record = Record {
             span_id,
             parent_id,
-            record_type: 0, // Default to log type
+            record_type,
             timestamp: Local::now().naive_local(),
             message,
             attr,
@@ -257,7 +258,7 @@ fn report(message: String, span_id: String, parent_id: String, attr: String) -> 
     let parent_uuid = Uuid::parse_str(&parent_id)
         .map_err(|e| PyRuntimeError::new_err(format!("Invalid parent_id UUID: {}", e)))?;
         
-    db.report(message, span_uuid, parent_uuid, attr)
+    db.report(message, span_uuid, parent_uuid, attr, 0)
         .map_err(PyRuntimeError::new_err)
 }
 
@@ -269,11 +270,155 @@ fn flush() -> PyResult<()> {
     db.flush().map_err(PyRuntimeError::new_err)
 }
 
+// --- Tracer Implementation ---
+
+struct TracerInner {
+    initial_parent_id: Uuid,
+    states: DashMap<ThreadId, Vec<Uuid>>,
+}
+
+#[pyclass]
+struct Tracer {
+    inner: Arc<TracerInner>,
+}
+
+#[pymethods]
+impl Tracer {
+    #[new]
+    #[pyo3(signature = (parent_id=None))]
+    fn new(parent_id: Option<String>) -> PyResult<Self> {
+        let pid = if let Some(s) = parent_id {
+            if s.is_empty() {
+                Uuid::nil()
+            } else {
+                Uuid::parse_str(&s).map_err(|e| PyRuntimeError::new_err(format!("Invalid parent_id: {}", e)))?
+            }
+        } else {
+            Uuid::nil()
+        };
+
+        Ok(Tracer {
+            inner: Arc::new(TracerInner {
+                initial_parent_id: pid,
+                states: DashMap::new(),
+            }),
+        })
+    }
+
+    fn log(&self, message: String, attr: String) -> PyResult<()> {
+        let current_pid = self.get_current_parent_id();
+        let span_id = Uuid::now_v7();
+        
+        let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
+        let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
+        
+        db.report(message, span_id, current_pid, attr, 0).map_err(PyRuntimeError::new_err)
+    }
+
+    fn span(&self, message: String, attr: String) -> SpanGuard {
+        SpanGuard {
+            inner: self.inner.clone(),
+            message,
+            attr,
+            span_id: Uuid::now_v7(),
+        }
+    }
+}
+
+impl Tracer {
+    fn get_current_parent_id(&self) -> Uuid {
+        let tid = thread::current().id();
+        if let Some(stack) = self.inner.states.get(&tid) {
+            if let Some(last) = stack.last() {
+                return *last;
+            }
+        }
+        self.inner.initial_parent_id
+    }
+}
+
+#[pyclass]
+struct SpanGuard {
+    inner: Arc<TracerInner>,
+    message: String,
+    attr: String,
+    span_id: Uuid,
+}
+
+#[pymethods]
+impl SpanGuard {
+    fn __enter__(&self) -> PyResult<()> {
+        let tid = thread::current().id();
+        
+        // Get current parent ID (before pushing self)
+        let current_pid = {
+            if let Some(stack) = self.inner.states.get(&tid) {
+                if let Some(last) = stack.last() {
+                    *last
+                } else {
+                    self.inner.initial_parent_id
+                }
+            } else {
+                self.inner.initial_parent_id
+            }
+        };
+
+        // Report Start
+        {
+            let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
+            let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
+            // Type 1 for Span Start
+            db.report(self.message.clone(), self.span_id, current_pid, self.attr.clone(), 1)
+                .map_err(PyRuntimeError::new_err)?;
+        }
+
+        // Push self to stack
+        self.inner.states.entry(tid).or_insert_with(Vec::new).push(self.span_id);
+        
+        Ok(())
+    }
+
+    fn __exit__(&self, _exc_type: Option<PyObject>, _exc_value: Option<PyObject>, _traceback: Option<PyObject>) -> PyResult<()> {
+        let tid = thread::current().id();
+        
+        // Pop self from stack
+        if let Some(mut stack) = self.inner.states.get_mut(&tid) {
+            stack.pop();
+        }
+        
+        // Get current parent ID (after popping)
+        let current_pid = {
+            if let Some(stack) = self.inner.states.get(&tid) {
+                if let Some(last) = stack.last() {
+                    *last
+                } else {
+                    self.inner.initial_parent_id
+                }
+            } else {
+                self.inner.initial_parent_id
+            }
+        };
+
+        // Report End
+        {
+            let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
+            let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
+            // Type 2 for Span End
+            db.report(self.message.clone(), self.span_id, current_pid, self.attr.clone(), 2)
+                .map_err(PyRuntimeError::new_err)?;
+        }
+        
+        Ok(())
+    }
+}
+
 #[pymodule]
 fn longtrace(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(initialize, m)?)?;
     m.add_function(wrap_pyfunction!(report, m)?)?;
     m.add_function(wrap_pyfunction!(flush, m)?)?;
+    m.add_class::<Tracer>()?;
+    m.add_class::<SpanGuard>()?;
     Ok(())
 }
 
@@ -341,7 +486,7 @@ mod tests {
             let message = format!("Test message {}", i);
             let attr = json!({"index": i, "test_id": &test_id}).to_string();
             
-            db.report(message, test_span_id, test_parent_id, attr.clone()).expect("Failed to report");
+            db.report(message, test_span_id, test_parent_id, attr.clone(), 0).expect("Failed to report");
         }
         
         // Flush to ensure all records are written
