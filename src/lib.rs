@@ -20,7 +20,7 @@ pub struct Record {
     pub record_type: i32,
     pub timestamp: chrono::NaiveDateTime,
     pub message: String,
-    pub attr: String, // JSON string
+    pub attr: Option<String>, // JSON string
 }
 
 // --- Pure Rust Implementation ---
@@ -152,12 +152,15 @@ impl RustDatabase {
                 
                 for record in batch.iter() {
                     // Parse the JSON string into a Value
-                    let attr_value: serde_json::Value = match serde_json::from_str(&record.attr) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("Failed to parse JSON attr: {}", e);
-                            continue;
-                        }
+                    let attr_value: Option<serde_json::Value> = match &record.attr {
+                        Some(s) => match serde_json::from_str(s) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                eprintln!("Failed to parse JSON attr: {}", e);
+                                None
+                            }
+                        },
+                        None => None,
                     };
                     
                     if let Err(e) = conn.execute(
@@ -183,7 +186,7 @@ impl RustDatabase {
         }
     }
 
-    pub fn report(&self, message: String, span_id: Uuid, parent_id: Uuid, attr: String, record_type: i32) -> Result<(), String> {
+    pub fn report(&self, message: String, span_id: Uuid, parent_id: Uuid, attr: Option<String>, record_type: i32) -> Result<(), String> {
         let record = Record {
             span_id,
             parent_id,
@@ -249,7 +252,8 @@ fn initialize(connection_string: &str, batch_size: Option<usize>, candidate_name
 }
 
 #[pyfunction]
-fn report(message: String, span_id: String, parent_id: String, attr: String) -> PyResult<()> {
+#[pyo3(signature = (message, span_id, parent_id, attr=None))]
+fn report(message: String, span_id: String, parent_id: String, attr: Option<String>) -> PyResult<()> {
     let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
     let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
     
@@ -305,7 +309,8 @@ impl Tracer {
         })
     }
 
-    fn log(&self, message: String, attr: String) -> PyResult<()> {
+    #[pyo3(signature = (message, attr=None))]
+    fn log(&self, message: String, attr: Option<String>) -> PyResult<()> {
         let current_pid = self.get_current_parent_id();
         let span_id = Uuid::now_v7();
         
@@ -315,7 +320,8 @@ impl Tracer {
         db.report(message, span_id, current_pid, attr, 0).map_err(PyRuntimeError::new_err)
     }
 
-    fn span(&self, message: String, attr: String) -> SpanGuard {
+    #[pyo3(signature = (message, attr=None))]
+    fn span(&self, message: String, attr: Option<String>) -> SpanGuard {
         SpanGuard {
             inner: self.inner.clone(),
             message,
@@ -341,7 +347,7 @@ impl Tracer {
 struct SpanGuard {
     inner: Arc<TracerInner>,
     message: String,
-    attr: String,
+    attr: Option<String>,
     span_id: Uuid,
 }
 
@@ -486,7 +492,7 @@ mod tests {
             let message = format!("Test message {}", i);
             let attr = json!({"index": i, "test_id": &test_id}).to_string();
             
-            db.report(message, test_span_id, test_parent_id, attr.clone(), 0).expect("Failed to report");
+            db.report(message, test_span_id, test_parent_id, Some(attr.clone()), 0).expect("Failed to report");
         }
         
         // Flush to ensure all records are written
