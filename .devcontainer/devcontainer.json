@@ -1,0 +1,39 @@
+{
+  "name": "longtrace",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-pg"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "sqltools.connections": [
+          {
+            "name": "PostgreSQL (Development)",
+            "driver": "PostgreSQL",
+            "server": "db",
+            "port": 5432,
+            "database": "longtrace",
+            "username": "postgres",
+            "password": "postgres",
+            "comment": "Development only - not for production use"
+          }
+        ]
+      }
+    }
+  },
+  "postCreateCommand": "echo 'Development environment ready!'",
+  "remoteEnv": {
+    "DATABASE_URL": "postgresql://postgres:postgres@db:5432/longtrace"
+  }
+}
