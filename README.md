@@ -44,6 +44,7 @@ cargo test --no-default-features
 
 ```python
 import longtrace
+import uuid
 
 # Connection string to your PostgreSQL server
 # Note: Do not include the database name in the connection string if you want it to use the default 'postgres' db for initialization.
@@ -51,21 +52,56 @@ import longtrace
 connection_string = "host=localhost user=postgres password=yourpassword"
 
 try:
-    # This will:
-    # 1. Connect to 'postgres'
-    # 2. Create database '20251128' (if today is 2025-11-28) if it doesn't exist
-    # 3. Connect to '20251128'
-    # 4. Create 'records' table if it doesn't exist
+    # Create database with default batch size (1024)
     db = longtrace.Database(connection_string)
+    
+    # Or specify a custom batch size
+    # db = longtrace.Database(connection_string, batch_size=500)
     
     print(f"Successfully connected to database: {db.db_name}")
     
-    # The database object holds the connection pool.
+    # Report records (asynchronous, batched)
+    # Note: It's recommended to use UUID v7 for better time-based sorting
+    span_id = str(uuid.uuid7())  # or uuid.uuid4()
+    parent_id = str(uuid.uuid7())
+    
+    db.report(
+        message="User logged in",
+        span_id=span_id,
+        parent_id=parent_id,
+        attr='{"user_id": 123, "ip": "192.168.1.1"}'
+    )
+    
+    # Report multiple records
+    for i in range(100):
+        db.report(
+            message=f"Processing item {i}",
+            span_id=str(uuid.uuid7()),
+            parent_id=span_id,
+            attr=f'{{"item_id": {i}}}'
+        )
+    
+    # Manually flush pending records to database
+    db.flush()
+    
+    # The database object holds the connection pool and batch writer thread.
     # It will remain active as long as the object exists.
+    # On destruction, it will automatically flush any pending records.
 
 except Exception as e:
     print(f"An error occurred: {e}")
 ```
+
+## Features
+
+### Asynchronous Batch Writing
+- Records are collected in batches and written asynchronously in a background thread
+- Default batch size is 1024 records (configurable)
+- Automatic flushing when batch size is reached
+- Manual flush available via `flush()` method
+- Automatic flush on database object destruction
+
+### Date-based Database Creation
 
 ## Schema
 
