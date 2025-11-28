@@ -17,8 +17,8 @@ except ImportError:
     longtrace = None
 
 # 数据库连接字符串，可以通过环境变量配置
-# 如果没有真实数据库，初始化可能会失败，但我们主要测试 Python 绑定逻辑
-CONN_STR = os.environ.get("LONGTRACE_DB_URL", "host=localhost user=postgres password=secret")
+# 优先使用 DATABASE_URL (devcontainer 标准)，其次是 LONGTRACE_DB_URL，最后是默认值
+CONN_STR = os.environ.get("DATABASE_URL") or os.environ.get("LONGTRACE_DB_URL", "host=localhost user=postgres password=secret")
 
 class TestLongtrace(unittest.TestCase):
     @classmethod
@@ -31,11 +31,12 @@ class TestLongtrace(unittest.TestCase):
 
         try:
             # 尝试初始化
-            # 注意：如果数据库连接失败，这里可能会抛出异常
+            # 使用 "longtrace" 作为数据库名，因为它在 devcontainer 中预定义存在
+            # 如果使用其他名字，需要确保该数据库已创建，或者不传 candidate_name 让其自动创建（但这需要 postgres 库的访问权限）
             cls.db_name = longtrace.initialize(
                 CONN_STR, 
                 batch_size=10, 
-                candidate_name="test_db"
+                candidate_name="longtrace"
             )
             print(f"Initialized database: {cls.db_name}")
         except RuntimeError as e:
