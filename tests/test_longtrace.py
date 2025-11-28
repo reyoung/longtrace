@@ -171,26 +171,23 @@ class TestLongtrace(unittest.TestCase):
         """测试手动的 start_span 和 complete_span"""
         tracer = longtrace.Tracer()
         try:
-            # Start a span
-            span_id = tracer.start_span("Manual Span", json.dumps({"type": "manual"}))
+            # Start a root span (parent_id=None)
+            # Signature: start_span(message, parent_id=None, attr=None)
+            span_id = tracer.start_span("Manual Root Span", parent_id=None, attr=json.dumps({"type": "manual"}))
             self.assertIsInstance(span_id, str)
             self.assertTrue(len(span_id) > 0)
             
-            # Log inside manual span
-            tracer.log("Inside Manual Span")
+            # Start a child span manually
+            child_span_id = tracer.start_span("Manual Child Span", parent_id=span_id)
             
-            # Start nested manual span
-            nested_span_id = tracer.start_span("Nested Manual Span")
-            tracer.log("Inside Nested Manual Span")
+            # Complete child span
+            # Signature: complete_span(span_id, parent_id=None, message=None, attr=None)
+            tracer.complete_span(child_span_id, parent_id=span_id, message="Manual Child Span End", attr=None)
             
-            # Complete nested span
-            tracer.complete_span(nested_span_id)
+            # Complete root span
+            tracer.complete_span(span_id, parent_id=None, message="Manual Root Span End", attr=None)
             
-            # Complete outer span
-            tracer.complete_span(span_id)
-            
-            # Test error: complete wrong span (if stack logic is strict)
-            # Or test complete non-existent span
+            # Test error: invalid uuid
             with self.assertRaises(RuntimeError):
                 tracer.complete_span("invalid-uuid")
                 

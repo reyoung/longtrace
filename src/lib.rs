@@ -324,78 +324,57 @@ impl Tracer {
         }
     }
 
-    #[pyo3(signature = (message, attr=None))]
-    fn start_span(&self, message: String, attr: Option<String>) -> PyResult<String> {
-        let tid = thread::current().id();
+    #[pyo3(signature = (message, parent_id=None, attr=None))]
+    fn start_span(&self, message: String, parent_id: Option<String>, attr: Option<String>) -> PyResult<String> {
         let span_id = Uuid::now_v7();
 
-        // Get current parent ID
-        let current_pid = {
-            if let Some(stack) = self.inner.states.get(&tid) {
-                if let Some(last) = stack.last() {
-                    last.id
-                } else {
-                    self.inner.initial_parent_id
-                }
-            } else {
+        // Resolve parent_id
+        let pid = if let Some(s) = parent_id {
+            if s.is_empty() {
                 self.inner.initial_parent_id
+            } else {
+                Uuid::parse_str(&s).map_err(|e| PyRuntimeError::new_err(format!("Invalid parent_id: {}", e)))?
             }
+        } else {
+            self.inner.initial_parent_id
         };
 
         // Report Start
         {
             let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
             let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
-            db.report(message.clone(), span_id, current_pid, attr.clone(), 1)
+            db.report(message, span_id, pid, attr, 1)
                 .map_err(PyRuntimeError::new_err)?;
         }
 
-        // Push to stack
-        self.inner.states.entry(tid).or_insert_with(Vec::new).push(ActiveSpan {
-            id: span_id,
-            message,
-            attr,
-        });
+        // Do NOT push to stack for manual spans
 
         Ok(span_id.to_string())
     }
 
-    fn complete_span(&self, span_id: String) -> PyResult<()> {
-        let tid = thread::current().id();
+    #[pyo3(signature = (span_id, parent_id=None, message=None, attr=None))]
+    fn complete_span(&self, span_id: String, parent_id: Option<String>, message: Option<String>, attr: Option<String>) -> PyResult<()> {
         let target_id = Uuid::parse_str(&span_id).map_err(|e| PyRuntimeError::new_err(format!("Invalid span_id: {}", e)))?;
 
-        let popped_span = {
-            let mut stack_guard = self.inner.states.get_mut(&tid).ok_or_else(|| PyRuntimeError::new_err("No active spans"))?;
-            
-            if let Some(last) = stack_guard.last() {
-                if last.id != target_id {
-                     return Err(PyRuntimeError::new_err(format!("Span mismatch: expected to complete {}, but found {} at top of stack", last.id, target_id)));
-                }
-            } else {
-                 return Err(PyRuntimeError::new_err("No active spans to complete"));
-            }
-            
-            stack_guard.pop().expect("Stack should not be empty")
-        };
-        
-        // Get current parent ID (after popping)
-        let current_pid = {
-            if let Some(stack) = self.inner.states.get(&tid) {
-                if let Some(last) = stack.last() {
-                    last.id
-                } else {
-                    self.inner.initial_parent_id
-                }
-            } else {
+        // Resolve parent_id
+        let pid = if let Some(s) = parent_id {
+            if s.is_empty() {
                 self.inner.initial_parent_id
+            } else {
+                Uuid::parse_str(&s).map_err(|e| PyRuntimeError::new_err(format!("Invalid parent_id: {}", e)))?
             }
+        } else {
+            self.inner.initial_parent_id
         };
         
         // Report End
         {
             let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
             let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
-            db.report(popped_span.message, popped_span.id, current_pid, popped_span.attr, 2)
+            
+            let msg = message.unwrap_or_default();
+
+            db.report(msg, target_id, pid, attr, 2)
                 .map_err(PyRuntimeError::new_err)?;
         }
         
