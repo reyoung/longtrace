@@ -1,13 +1,14 @@
 # Longtrace
 
-A Rust-based Python library for logging records to a PostgreSQL database.
+A Rust-based Python library for logging records to a PostgreSQL database with distributed tracing support.
 
 ## Features
 
-- Exposes a `Database` object to Python.
-- Automatically creates a database named after the current date (YYYYMMDD).
-- Manages a connection pool.
-- Creates a `records` table with the specified schema.
+- **High Performance**: Implemented in Rust for minimal overhead.
+- **Global Singleton**: Easy initialization and access across your application.
+- **Tracer Support**: Built-in `Tracer` class for managing spans and parent IDs automatically, with thread-local context support.
+- **Asynchronous Batching**: Records are buffered and written to the database in background threads to avoid blocking the main application.
+- **Automatic Schema Management**: Automatically creates the necessary tables (`records`) if they don't exist.
 
 ## Prerequisites
 
@@ -42,66 +43,76 @@ cargo test --no-default-features
 
 ## Usage
 
+### Initialization
+
+Initialize the library once at the start of your application.
+
+```python
+import longtrace
+
+# Connection string to your PostgreSQL server
+connection_string = "host=localhost user=postgres password=yourpassword dbname=longtrace"
+
+# Initialize the global database connection
+longtrace.initialize(connection_string)
+```
+
+### Using Tracer (Recommended)
+
+The `Tracer` class helps manage `span_id` and `parent_id` automatically, supporting nested spans and thread-local context.
+
+```python
+import longtrace
+import json
+
+# Create a tracer (can be global or local)
+# Optionally provide a root parent_id
+tracer = longtrace.Tracer()
+
+# Log a simple event
+tracer.log("Application started")
+
+# Start a span
+with tracer.span("Processing Request", attr=json.dumps({"request_id": "123"})):
+    tracer.log("Step 1 completed")
+    
+    # Nested span
+    with tracer.span("Database Query"):
+        tracer.log("Querying user data")
+        # ... perform work ...
+    
+    tracer.log("Step 2 completed")
+
+# Attributes are optional
+tracer.log("Simple log without attributes")
+```
+
+### Manual Reporting
+
+You can also manually report records if you need full control over IDs.
+
 ```python
 import longtrace
 import uuid
 
-# Connection string to your PostgreSQL server
-# Note: Do not include the database name in the connection string if you want it to use the default 'postgres' db for initialization.
-# The library will connect to 'postgres' to check/create the YYYYMMDD database.
-connection_string = "host=localhost user=postgres password=yourpassword"
+span_id = str(uuid.uuid4())
+parent_id = str(uuid.uuid4())
 
-try:
-    # Create database with default batch size (1024)
-    db = longtrace.Database(connection_string)
-    
-    # Or specify a custom batch size
-    # db = longtrace.Database(connection_string, batch_size=500)
-    
-    print(f"Successfully connected to database: {db.db_name}")
-    
-    # Report records (asynchronous, batched)
-    # Note: It's recommended to use UUID v7 for better time-based sorting
-    span_id = str(uuid.uuid7())  # or uuid.uuid4()
-    parent_id = str(uuid.uuid7())
-    
-    db.report(
-        message="User logged in",
-        span_id=span_id,
-        parent_id=parent_id,
-        attr='{"user_id": 123, "ip": "192.168.1.1"}'
-    )
-    
-    # Report multiple records
-    for i in range(100):
-        db.report(
-            message=f"Processing item {i}",
-            span_id=str(uuid.uuid7()),
-            parent_id=span_id,
-            attr=f'{{"item_id": {i}}}'
-        )
-    
-    # Manually flush pending records to database
-    db.flush()
-    
-    # The database object holds the connection pool and batch writer thread.
-    # It will remain active as long as the object exists.
-    # On destruction, it will automatically flush any pending records.
-
-except Exception as e:
-    print(f"An error occurred: {e}")
+longtrace.report(
+    message="Manual report",
+    span_id=span_id,
+    parent_id=parent_id,
+    attr='{"custom": "data"}' # Optional JSON string
+)
 ```
 
-## Features
+### Flushing
 
-### Asynchronous Batch Writing
-- Records are collected in batches and written asynchronously in a background thread
-- Default batch size is 1024 records (configurable)
-- Automatic flushing when batch size is reached
-- Manual flush available via `flush()` method
-- Automatic flush on database object destruction
+The library automatically flushes records in the background. However, you can force a flush, which is useful before application exit.
 
-### Date-based Database Creation
+```python
+longtrace.flush()
+```
 
 ## Schema
 
@@ -112,7 +123,7 @@ CREATE TABLE records (
     id BIGSERIAL PRIMARY KEY,
     span_id UUID,
     parent_id UUID,
-    type INTEGER,
+    type INTEGER, -- 0: Log, 1: Span Start, 2: Span End
     timestamp TIMESTAMP,
     message TEXT,
     attr JSONB
