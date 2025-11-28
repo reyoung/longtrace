@@ -38,34 +38,39 @@ enum BatchCommand {
 }
 
 impl RustDatabase {
-    pub fn new(connection_string: &str, batch_size: Option<usize>) -> Result<Self, String> {
+    pub fn new(connection_string: &str, batch_size: Option<usize>, db_name: Option<String>) -> Result<Self, String> {
         let batch_size = batch_size.unwrap_or(1024);
         
         // 1. Parse the connection string into a Config object
         let mut config = Config::from_str(connection_string)
             .map_err(|e| format!("Invalid connection string: {}", e))?;
 
-        // 2. Connect to 'postgres' database to check/create the target database
-        let mut maintenance_config = config.clone();
-        maintenance_config.dbname("postgres");
+        let target_db_name = if let Some(name) = db_name {
+            name
+        } else {
+            // 2. Connect to 'postgres' database to check/create the target database
+            let mut maintenance_config = config.clone();
+            maintenance_config.dbname("postgres");
 
-        let target_db_name = Local::now().format("%Y%m%d").to_string();
+            let name = Local::now().format("%Y%m%d").to_string();
 
-        {
-            let mut client = maintenance_config.connect(NoTls)
-                .map_err(|e| format!("Failed to connect to maintenance DB: {}", e))?;
-            
-            let check_query = "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)";
-            let exists: bool = client.query_one(check_query, &[&target_db_name])
-                .map_err(|e| format!("Failed to check DB existence: {}", e))?
-                .get(0);
+            {
+                let mut client = maintenance_config.connect(NoTls)
+                    .map_err(|e| format!("Failed to connect to maintenance DB: {}", e))?;
+                
+                let check_query = "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)";
+                let exists: bool = client.query_one(check_query, &[&name])
+                    .map_err(|e| format!("Failed to check DB existence: {}", e))?
+                    .get(0);
 
-            if !exists {
-                let create_query = format!("CREATE DATABASE \"{}\"", target_db_name);
-                client.batch_execute(&create_query)
-                    .map_err(|e| format!("Failed to create database '{}': {}", target_db_name, e))?;
+                if !exists {
+                    let create_query = format!("CREATE DATABASE \"{}\"", name);
+                    client.batch_execute(&create_query)
+                        .map_err(|e| format!("Failed to create database '{}': {}", name, e))?;
+                }
             }
-        }
+            name
+        };
 
         // 3. Connect to the target database using a connection pool
         config.dbname(&target_db_name);
@@ -213,48 +218,62 @@ impl Drop for RustDatabase {
 
 // --- Python Bindings ---
 
-#[pyclass(name = "Database")]
-struct PyDatabase {
-    inner: Arc<Mutex<RustDatabase>>,
+// Global Registry
+// Use Mutex<Option<Arc<RustDatabase>>> for a single global instance
+static REGISTRY: Mutex<Option<Arc<RustDatabase>>> = Mutex::new(None);
+
+#[pyfunction]
+#[pyo3(signature = (connection_string, batch_size=None, candidate_name=None))]
+fn initialize(connection_string: &str, batch_size: Option<usize>, candidate_name: Option<String>) -> PyResult<String> {
+    let mut guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
+    
+    if guard.is_some() {
+        // Already initialized. 
+        // According to requirements: "init函数只能调用一次".
+        // We can either return the existing name or throw an error.
+        // Let's return the existing name but log a warning or just return it silently.
+        // However, if the user expects to re-initialize with different params, this is a hard error.
+        // Let's assume strict single initialization.
+        return Err(PyRuntimeError::new_err("Database already initialized"));
+    }
+
+    // Create new
+    let db = RustDatabase::new(connection_string, batch_size, candidate_name.clone())
+        .map_err(PyRuntimeError::new_err)?;
+    
+    let name = db.db_name.clone();
+    *guard = Some(Arc::new(db));
+    
+    Ok(name)
 }
 
-#[pymethods]
-impl PyDatabase {
-    #[new]
-    #[pyo3(signature = (connection_string, batch_size=None))]
-    fn new(connection_string: &str, batch_size: Option<usize>) -> PyResult<Self> {
-        match RustDatabase::new(connection_string, batch_size) {
-            Ok(db) => Ok(PyDatabase { inner: Arc::new(Mutex::new(db)) }),
-            Err(e) => Err(PyRuntimeError::new_err(e)),
-        }
-    }
+#[pyfunction]
+fn report(message: String, span_id: String, parent_id: String, attr: String) -> PyResult<()> {
+    let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
+    let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
+    
+    let span_uuid = Uuid::parse_str(&span_id)
+        .map_err(|e| PyRuntimeError::new_err(format!("Invalid span_id UUID: {}", e)))?;
+    let parent_uuid = Uuid::parse_str(&parent_id)
+        .map_err(|e| PyRuntimeError::new_err(format!("Invalid parent_id UUID: {}", e)))?;
+        
+    db.report(message, span_uuid, parent_uuid, attr)
+        .map_err(PyRuntimeError::new_err)
+}
 
-    #[getter]
-    fn db_name(&self) -> PyResult<String> {
-        let db = self.inner.lock().map_err(|e| PyRuntimeError::new_err(format!("Lock error: {}", e)))?;
-        Ok(db.db_name.clone())
-    }
-
-    fn report(&self, message: String, span_id: String, parent_id: String, attr: String) -> PyResult<()> {
-        let span_uuid = Uuid::parse_str(&span_id)
-            .map_err(|e| PyRuntimeError::new_err(format!("Invalid span_id UUID: {}", e)))?;
-        let parent_uuid = Uuid::parse_str(&parent_id)
-            .map_err(|e| PyRuntimeError::new_err(format!("Invalid parent_id UUID: {}", e)))?;
-
-        let db = self.inner.lock().map_err(|e| PyRuntimeError::new_err(format!("Lock error: {}", e)))?;
-        db.report(message, span_uuid, parent_uuid, attr)
-            .map_err(|e| PyRuntimeError::new_err(e))
-    }
-
-    fn flush(&self) -> PyResult<()> {
-        let db = self.inner.lock().map_err(|e| PyRuntimeError::new_err(format!("Lock error: {}", e)))?;
-        db.flush().map_err(|e| PyRuntimeError::new_err(e))
-    }
+#[pyfunction]
+fn flush() -> PyResult<()> {
+    let guard = REGISTRY.lock().map_err(|e| PyRuntimeError::new_err(format!("Registry lock error: {}", e)))?;
+    let db = guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("Database not initialized"))?;
+    
+    db.flush().map_err(PyRuntimeError::new_err)
 }
 
 #[pymodule]
 fn longtrace(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyDatabase>()?;
+    m.add_function(wrap_pyfunction!(initialize, m)?)?;
+    m.add_function(wrap_pyfunction!(report, m)?)?;
+    m.add_function(wrap_pyfunction!(flush, m)?)?;
     Ok(())
 }
 
@@ -275,7 +294,7 @@ mod tests {
         let conn_str = get_connection_string();
         
         // Use the Rust implementation directly, avoiding PyO3 context
-        let db_result = RustDatabase::new(&conn_str, None);
+        let db_result = RustDatabase::new(&conn_str, None, None);
         
         match db_result {
             Ok(db) => {
@@ -311,7 +330,7 @@ mod tests {
     #[test]
     fn test_batch_reporting() {
         let conn_str = get_connection_string();
-        let db = RustDatabase::new(&conn_str, Some(5)).expect("Failed to create database");
+        let db = RustDatabase::new(&conn_str, Some(5), None).expect("Failed to create database");
         
         let test_span_id = Uuid::now_v7();
         let test_parent_id = Uuid::now_v7();
