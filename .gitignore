@@ -1,0 +1,25 @@
+# Rust build artifacts
+/target/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cargo lock is typically committed for applications but may be excluded for libraries
+# Cargo.lock
